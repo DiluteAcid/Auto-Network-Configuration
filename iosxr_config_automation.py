@@ -1,87 +1,65 @@
-import netmiko
-import requests
-import json
-from requests.auth import HTTPBasicAuth
 import paramiko
 import time
 
 # Device connection details
 device = {
-    'device_type': 'cisco_xr',
-    'host': 'sandbox-iosxr-1.cisco.com',
-    'username': 'admin',
-    'password': 'C1sco12345',  # Default password for DevNet sandbox
-    'port': 22,  # SSH port
+    'hostname': 'your_device_ip_or_hostname',
+    'username': 'your_username',
+    'password': 'your_password',
+    'port': 22,  # SSH port, usually 22
 }
 
-# API details
-api_base_url = f"https://{device['host']}:443/restconf/data"  # Changed to port 443
-headers = {
-    "Accept": "application/yang-data+json",
-    "Content-Type": "application/yang-data+json"
-}
+def send_command(channel, command, expect_string='#', timeout=5):
+    channel.send(command + '\n')
+    output = ''
+    start_time = time.time()
+    while True:
+        if channel.recv_ready():
+            output += channel.recv(1024).decode('utf-8')
+            if expect_string in output:
+                break
+        if time.time() - start_time > timeout:
+            raise Exception(f"Timeout waiting for '{expect_string}' after command '{command}'")
+        time.sleep(0.1)
+    return output
 
-def ssh_command_paramiko(command):
+def configure_device(channel, commands):
+    send_command(channel, 'configure terminal', expect_string='(config)#')
+    for command in commands:
+        output = send_command(channel, command, expect_string='(config')
+        print(f"Executed: {command}")
+        print(output)
+    send_command(channel, 'commit')
+    send_command(channel, 'end')
+
+def main():
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(device['host'], port=device['port'], username=device['username'], password=device['password'], timeout=10)
-        _, stdout, _ = ssh.exec_command(command)
-        output = stdout.read().decode('utf-8')
-        ssh.close()
-        return output
+        ssh.connect(**device, timeout=10, allow_agent=False, look_for_keys=False)
+
+        channel = ssh.invoke_shell()
+        channel.settimeout(20)
+
+        print("Device information (via SSH):")
+        print(send_command(channel, "show version"))
+
+        print("\nConfiguring loopback interface (via SSH):")
+        config_commands = [
+            'interface loopback 100',
+            'description Configured by Python Script',
+            'ipv4 address 192.168.100.1 255.255.255.255',
+        ]
+        configure_device(channel, config_commands)
+
+        print("\nVerifying loopback interface configuration:")
+        print(send_command(channel, "show run interface loopback 100"))
+
     except Exception as e:
-        return f"Error executing command via SSH: {str(e)}"
-
-def api_get_request(endpoint):
-    try:
-        response = requests.get(
-            f"{api_base_url}/{endpoint}",
-            auth=HTTPBasicAuth(device['username'], device['password']),
-            headers=headers,
-            verify=False,  # Disable SSL verification (not recommended for production)
-            timeout=10
-        )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        return f"Error making API request: {str(e)}"
-
-# Example usage
-if __name__ == "__main__":
-    # Get device information via SSH
-    print("Device information (via SSH):")
-    print(ssh_command_paramiko("show version"))
-
-    # Get interface information via RESTCONF API
-    print("\nInterface information (via RESTCONF API):")
-    interfaces = api_get_request("Cisco-IOS-XR-pfi-im-cmd-oper:interfaces/interface-xr/interface")
-    print(json.dumps(interfaces, indent=2))
-
-    # Example: Configure a loopback interface via SSH
-    print("\nConfiguring loopback interface (via SSH):")
-    config_commands = [
-        'configure terminal',
-        'interface loopback 100',
-        'description Configured by Python',
-        'ipv4 address 192.168.100.1 255.255.255.255',
-        'commit',
-        'end'
-    ]
-    
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        ssh.connect(device['host'], port=device['port'], username=device['username'], password=device['password'], timeout=10)
-        for command in config_commands:
-            _, stdout, _ = ssh.exec_command(command)
-            time.sleep(1)  # Give some time for each command to execute
-        print("Configuration commands executed.")
-    except Exception as e:
-        print(f"Error configuring interface: {str(e)}")
+        print(f"An error occurred: {str(e)}")
     finally:
-        ssh.close()
+        if ssh:
+            ssh.close()
 
-    # Verify the configuration
-    print("\nVerifying loopback interface configuration:")
-    print(ssh_command_paramiko("show run interface loopback 100"))
+if __name__ == "__main__":
+    main()
